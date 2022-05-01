@@ -437,14 +437,14 @@ fn main() -> anyhow::Result<()> {
         libmap.entry(missing_dep).or_default().entry(package).or_default().push(file);
     }
     for missing_dep in libmap.keys() {
-        print!("packages ");
+        print!("package{} ", if libmap[missing_dep].keys().len() > 1 { "s" } else { "" });
         for (i, package) in libmap[missing_dep].keys().enumerate() {
             print!("{}", Yellow.paint(package.to_string()));
             if i+1 < libmap[missing_dep].keys().len() {
                 print!(";");
             }
         }
-        print!(" are missing {}", Red.paint(missing_dep));
+        print!(" {} missing {}", if libmap[missing_dep].keys().len() == 1 { "is" } else { "are" }, Red.paint(missing_dep));
         println!();
     }
     if env::args().any(|x| x.starts_with("-v") || x.starts_with("--v")) {
