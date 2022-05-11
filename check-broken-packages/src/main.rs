@@ -2,6 +2,7 @@ use std::cmp;
 use std::env;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::BufRead;
@@ -111,13 +112,13 @@ fn get_python_version() -> anyhow::Result<PythonPackageVersion> {
 
 fn get_package_owning_path(path: &str) -> anyhow::Result<Vec<String>> {
     let output = Command::new("pacman")
-        .args(&["-Qoq", path])
+        .args(&["-Fq", path])
         .env("LANG", "C")
         .output()?;
 
     Ok(output
         .stdout
-        .lines()
+        .lines().map(|l| l.map(|i| i.split_once('/').expect("no file").1.to_string()))
         .collect::<Result<Vec<String>, std::io::Error>>()?)
 }
 
@@ -163,7 +164,7 @@ fn get_aur_packages() -> anyhow::Result<Vec<String>> {
         .collect::<Result<Vec<String>, std::io::Error>>()?)
 }
 
-fn get_package_executable_files(package: &str) -> anyhow::Result<Vec<String>> {
+fn get_package_linked_files(package: &str) -> anyhow::Result<Vec<String>> {
     let output = Command::new("pacman")
         .args(&["-Ql", package])
         .env("LANG", "C")
@@ -186,12 +187,18 @@ fn get_package_executable_files(package: &str) -> anyhow::Result<Vec<String>> {
         })
         .filter(|p| {
             fs::metadata(&p)
-                .map(|m| m.file_type().is_file() && ((m.permissions().mode() & 0o111) != 0))
+                .map(|m| m.file_type().is_file() && ((m.permissions().mode() & 0o111) != 0 || (p.chars().filter(|&c|c=='/').count() == 3 && p.ends_with(".so"))))
                 .unwrap_or(false)
         })
         .collect();
 
     Ok(files)
+}
+
+fn is_direct_dep(exec_file: &str, dep: &str) -> anyhow::Result<bool> {
+    return Ok(Command::new("patchelf")
+        .args(&["--print-needed", exec_file])
+        .output()?.stdout.lines().any(|d| d.unwrap() == dep));
 }
 
 fn get_missing_dependencies(exec_file: &str) -> anyhow::Result<Vec<String>> {
@@ -209,6 +216,7 @@ fn get_missing_dependencies(exec_file: &str) -> anyhow::Result<Vec<String>> {
             .filter(|l| l.ends_with("=> not found"))
             .filter_map(|l| l.split(' ').next().map(|s| s.to_owned()))
             .map(|l| l.trim_start().to_string())
+            //.filter(|l| !output.status.success() || direct_deps.contains(l))
             .collect()
     } else {
         Vec::new()
@@ -333,7 +341,8 @@ fn main() -> anyhow::Result<()> {
                                 let to_send = (
                                     Arc::clone(&exec_file_work.package),
                                     Arc::clone(&exec_file_work.exec_filepath),
-                                    missing_dep,
+                                    missing_dep.clone(),
+                                    get_package_owning_path(missing_dep.split("/").last().unwrap().split_inclusive(".so").next().unwrap()).unwrap_or(vec!["?".to_string()])
                                 );
                                 debug!("{:?} => missing_deps_tx", &to_send);
                                 if missing_deps_tx.send(to_send).is_err() {
@@ -371,7 +380,7 @@ fn main() -> anyhow::Result<()> {
                 scope.spawn(move |_| {
                     while let Ok(package) = package_rx.recv() {
                         debug!("package_rx => {:?}", package);
-                        let exec_files = match get_package_executable_files(&package) {
+                        let exec_files = match get_package_linked_files(&package) {
                             Ok(exec_files) => exec_files,
                             Err(err) => {
                                 eprintln!(
@@ -433,22 +442,105 @@ fn main() -> anyhow::Result<()> {
     progress.finish_and_clear();
 
     let mut libmap = HashMap::<String, HashMap<Arc<String>, BinaryHeap<Arc<String>>>>::new();
-    for (package, file, missing_dep) in missing_deps_rx.iter() {
-        libmap.entry(missing_dep).or_default().entry(package).or_default().push(file);
+    let mut trans2 = HashSet::<String>::new();
+    let mut pacmap = HashMap::<String, HashSet<String>>::new();
+    let mut pacsourcemap = HashMap::<String, String>::new();
+    for (package, file, missing_dep, pkg) in missing_deps_rx.iter() {
+        if is_direct_dep(file.as_str(), &missing_dep.clone()).unwrap_or(true) {
+            libmap.entry(missing_dep.clone()).or_default().entry(package.clone()).or_default().push(file);
+            //pacmap.entry(package.to_string()).or_default().insert(pkg.join(", "));
+            pacmap.entry(package.to_string()).or_default().insert(missing_dep.clone());
+        } else {
+            trans2.insert(package.to_string());
+        }
+        if !pkg.is_empty() {
+            pacsourcemap.insert(missing_dep, pkg[0].clone());
+        }
+        //println!("{} {}", pkg.join(" "), missing_dep);
     }
-    for missing_dep in libmap.keys() {
-        print!("package{} ", if libmap[missing_dep].keys().len() > 1 { "s" } else { "" });
-        for (i, package) in libmap[missing_dep].keys().enumerate() {
-            print!("{}", Yellow.paint(package.to_string()));
-            if i+1 < libmap[missing_dep].keys().len() {
+    let mut trans = HashSet::<String>::new();
+    for t in trans2 {
+        if ! pacmap.contains_key(&t) {
+            trans.insert(t);
+        }
+    }
+    // for missing_dep in libmap.keys() {
+    //     //if libmap[missing_dep].keys().len() == 1 { continue }
+    //     print!("package{} need rebuild because of missing {}: ", if libmap[missing_dep].keys().len() > 1 { "s" } else { "" }, Yellow.paint(missing_dep));
+    //     for package in libmap[missing_dep].keys() {
+    //         println!("{}", Red.paint(package.to_string()));
+    //     }
+    // }
+    // println!();
+    for pkg in pacmap.keys() {
+        print!("package {} misses ", Red.paint(pkg));
+        for (i, file) in pacmap[pkg].iter().enumerate() {
+            print!("{}", Yellow.paint(file));
+            if pacsourcemap.contains_key(file) {
+                print!(" from {}", Cyan.paint(pacsourcemap[file].clone()));
+            }
+            if i+1 < pacmap[pkg].len() {
                 print!(";");
             }
         }
-        print!(" {} missing {}", if libmap[missing_dep].keys().len() == 1 { "is" } else { "are" }, Red.paint(missing_dep));
         println!();
     }
+    print!("transitively broken packages: ");
+    /*
+    let t3 = trans.clone();
+    let mut x = t3.iter().map(|t| Yellow.paint(t));
+    x.next().and_then(|t| { print!("{}", t); Some(t) } );
+    x.for_each(|t| print!(", {}", t));
+    println!();
+    trans.clone().iter().map(|t| Yellow.paint(t)).take(1).for_each(|t| print!("{}", t));
+    trans.clone().iter().map(|t| Yellow.paint(t)).skip(1).for_each(|t| print!(", {}", t));
+    println!();
+    trans.clone().iter().map(|t| Yellow.paint(t)).scan("", |sep,t|{ print!("{}{}", *sep, t); *sep=", "; Some(0) }).for_each(drop);
+    println!();
+    for (t, i) in trans.clone().iter().zip(std::iter::once("").chain(std::iter::repeat(", "))) {
+        print!("{}{}", i, Yellow.paint(t));
+    }
+    println!();
+    std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone().iter().map(|t| Yellow.paint(t))).for_each(|t| print!("{}{}", t.0, t.1));
+    println!();
+    std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone()).for_each(|t| print!("{}{}", t.0, Yellow.paint(t.1)));
+    println!();
+    for (i, t) in trans.iter().map(|t| Yellow.paint(t)).enumerate() {
+        match i {
+            0 => print!("{}", t), 
+            _ => print!(", {}", t)
+        }
+    }
+    println!();
+    for (i, t) in trans.iter().enumerate() {
+        print!("{}{}", if i > 0 {", "} else {""}, Yellow.paint(t));
+    }
+    println!();
+    for (i, t) in trans.iter().enumerate() {
+        print!("{}{}", ["", ", "][(i>0) as usize], Yellow.paint(t));
+    }
+    // println!();
+    // for (d, p) in [", ", ""].iter().zip(trans.iter().collect::<Vec<_>>().chunks(trans.len()-1)) {
+    //     for e in p {
+    //         print!("{}{}", Yellow.paint(*e), d);
+    //     }
+    // }
+    println!();
+    let mut it = trans.iter().map(|t| Yellow.paint(t));
+    if let Some(first) = it.next() {
+        print!("{}", first);
+        for e in it {
+            print!(", {}", e);
+        }
+    }
+    println!();
+    */
+    let mut sep = ""; for t in trans { print!("{}{}", sep, Yellow.paint(t)); sep = ", "; }
+    println!();
+
     if env::args().any(|x| x.starts_with("-v") || x.starts_with("--v")) {
         println!("{:#?}", libmap);
+        println!("{:#?}", pacmap);
     }
 
     if let Ok(broken_python_packages) = python_broken_packages_rx.recv() {
