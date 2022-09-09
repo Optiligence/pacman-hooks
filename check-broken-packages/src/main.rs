@@ -446,6 +446,7 @@ fn main() -> anyhow::Result<()> {
     let mut pacmap = HashMap::<String, HashSet<String>>::new();
     let mut pacsourcemap = HashMap::<String, String>::new();
     for (package, file, missing_dep, pkg) in missing_deps_rx.iter() {
+        println!("{} {} {} {}", pkg.join(" "), missing_dep.clone(), package.clone(), file.clone());
         if is_direct_dep(file.as_str(), &missing_dep.clone()).unwrap_or(true) {
             libmap.entry(missing_dep.clone()).or_default().entry(package.clone()).or_default().push(file);
             //pacmap.entry(package.to_string()).or_default().insert(pkg.join(", "));
@@ -454,9 +455,8 @@ fn main() -> anyhow::Result<()> {
             trans2.insert(package.to_string());
         }
         if !pkg.is_empty() {
-            pacsourcemap.insert(missing_dep, pkg[0].clone());
+            pacsourcemap.insert(missing_dep.clone(), pkg[0].clone());
         }
-        //println!("{} {}", pkg.join(" "), missing_dep);
     }
     let mut trans = HashSet::<String>::new();
     for t in trans2 {
@@ -464,14 +464,16 @@ fn main() -> anyhow::Result<()> {
             trans.insert(t);
         }
     }
-    // for missing_dep in libmap.keys() {
-    //     //if libmap[missing_dep].keys().len() == 1 { continue }
-    //     print!("package{} need rebuild because of missing {}: ", if libmap[missing_dep].keys().len() > 1 { "s" } else { "" }, Yellow.paint(missing_dep));
-    //     for package in libmap[missing_dep].keys() {
-    //         println!("{}", Red.paint(package.to_string()));
-    //     }
-    // }
-    // println!();
+
+    for missing_dep in libmap.keys() {
+        //if libmap[missing_dep].keys().len() == 1 { continue }
+        print!("package{} need rebuild because of missing {}:", if libmap[missing_dep].keys().len() > 1 { "s" } else { "" }, Yellow.paint(missing_dep));
+        for package in libmap[missing_dep].keys() {
+            print!(" {}", Red.paint(package.to_string()));
+        }
+        println!();
+    }
+
     for pkg in pacmap.keys() {
         print!("package {} misses ", Red.paint(pkg));
         for (i, file) in pacmap[pkg].iter().enumerate() {
@@ -485,58 +487,69 @@ fn main() -> anyhow::Result<()> {
         }
         println!();
     }
-    print!("transitively broken packages: ");
-    /*
-    let t3 = trans.clone();
-    let mut x = t3.iter().map(|t| Yellow.paint(t));
-    x.next().and_then(|t| { print!("{}", t); Some(t) } );
-    x.for_each(|t| print!(", {}", t));
-    println!();
-    trans.clone().iter().map(|t| Yellow.paint(t)).take(1).for_each(|t| print!("{}", t));
-    trans.clone().iter().map(|t| Yellow.paint(t)).skip(1).for_each(|t| print!(", {}", t));
-    println!();
-    trans.clone().iter().map(|t| Yellow.paint(t)).scan("", |sep,t|{ print!("{}{}", *sep, t); *sep=", "; Some(0) }).for_each(drop);
-    println!();
-    for (t, i) in trans.clone().iter().zip(std::iter::once("").chain(std::iter::repeat(", "))) {
-        print!("{}{}", i, Yellow.paint(t));
-    }
-    println!();
-    std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone().iter().map(|t| Yellow.paint(t))).for_each(|t| print!("{}{}", t.0, t.1));
-    println!();
-    std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone()).for_each(|t| print!("{}{}", t.0, Yellow.paint(t.1)));
-    println!();
-    for (i, t) in trans.iter().map(|t| Yellow.paint(t)).enumerate() {
-        match i {
-            0 => print!("{}", t), 
-            _ => print!(", {}", t)
+
+    if !trans.is_empty() {
+        let t3 = trans.clone();
+        let mut x = t3.iter().map(|t| Yellow.paint(t));
+        x.next().and_then(|t| { print!("{}", t); Some(t) } );
+        x.for_each(|t| print!(", {}", t));
+        println!();
+
+        trans.clone().iter().map(|t| Yellow.paint(t)).take(1).for_each(|t| print!("{}", t));
+        trans.clone().iter().map(|t| Yellow.paint(t)).skip(1).for_each(|t| print!(", {}", t));
+        println!();
+
+        trans.clone().iter().map(|t| Yellow.paint(t)).scan("", |sep,t|{ print!("{}{}", *sep, t); *sep=", "; Some(0) }).for_each(drop);
+        println!();
+
+        for (t, i) in trans.clone().iter().zip(std::iter::once("").chain(std::iter::repeat(", "))) {
+            print!("{}{}", i, Yellow.paint(t));
         }
-    }
-    println!();
-    for (i, t) in trans.iter().enumerate() {
-        print!("{}{}", if i > 0 {", "} else {""}, Yellow.paint(t));
-    }
-    println!();
-    for (i, t) in trans.iter().enumerate() {
-        print!("{}{}", ["", ", "][(i>0) as usize], Yellow.paint(t));
-    }
-    // println!();
-    // for (d, p) in [", ", ""].iter().zip(trans.iter().collect::<Vec<_>>().chunks(trans.len()-1)) {
-    //     for e in p {
-    //         print!("{}{}", Yellow.paint(*e), d);
-    //     }
-    // }
-    println!();
-    let mut it = trans.iter().map(|t| Yellow.paint(t));
-    if let Some(first) = it.next() {
-        print!("{}", first);
-        for e in it {
-            print!(", {}", e);
+        println!();
+
+        std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone().iter().map(|t| Yellow.paint(t))).for_each(|t| print!("{}{}", t.0, t.1));
+        println!();
+
+        std::iter::once("").chain(std::iter::repeat(", ")).zip(trans.clone()).for_each(|t| print!("{}{}", t.0, Yellow.paint(t.1)));
+        println!();
+
+        for (i, t) in trans.iter().map(|t| Yellow.paint(t)).enumerate() {
+            match i {
+                0 => print!("{}", t),
+                _ => print!(", {}", t)
+            }
         }
+        println!();
+
+        for (i, t) in trans.iter().enumerate() {
+            print!("{}{}", if i > 0 {", "} else {""}, Yellow.paint(t));
+        }
+        println!();
+
+        for (i, t) in trans.iter().enumerate() {
+            print!("{}{}", ["", ", "][(i>0) as usize], Yellow.paint(t));
+        }
+        println!();
+
+        for (d, p) in [", ", ""].iter().zip(trans.iter().collect::<Vec<_>>().chunks(trans.len()-1)) {
+            for e in p {
+                print!("{}{}", Yellow.paint(*e), d);
+            }
+        }
+        println!();
+
+        let mut it = trans.iter().map(|t| Yellow.paint(t));
+        if let Some(first) = it.next() {
+            print!("{}", first);
+            for e in it {
+                print!(", {}", e);
+            }
+        }
+        println!();
+
+        let mut sep = "transitively broken packages: "; for t in trans { print!("{}{}", sep, Yellow.paint(t)); sep = ", "; }
+        println!();
     }
-    println!();
-    */
-    let mut sep = ""; for t in trans { print!("{}{}", sep, Yellow.paint(t)); sep = ", "; }
-    println!();
 
     if env::args().any(|x| x.starts_with("-v") || x.starts_with("--v")) {
         println!("{:#?}", libmap);
